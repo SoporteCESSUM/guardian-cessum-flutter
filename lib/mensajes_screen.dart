@@ -20,6 +20,52 @@ import 'auth/session_store.dart';
 class MensajesScreen extends StatefulWidget {
   const MensajesScreen({super.key});
 
+  // Una sola consulta en memoria para la cuenta efectiva del menú.
+  static String _cuenta = '';
+  static DateTime? _recibido;
+  static Future<Map<String, dynamic>>? _consulta;
+
+  static Future<Map<String, dynamic>> _hilosDe(String correo,
+      {bool actualizar = false}) {
+    final anterior = _consulta;
+    final recibido = _recibido;
+    if (_cuenta == correo && anterior != null &&
+        (recibido == null || (!actualizar &&
+            DateTime.now().difference(recibido) < const Duration(seconds: 30)))) {
+      return anterior;
+    }
+    _cuenta = correo;
+    _recibido = null;
+    late final Future<Map<String, dynamic>> solicitud;
+    solicitud = _pedirHilos(correo).then((datos) {
+      if (identical(_consulta, solicitud)) _recibido = DateTime.now();
+      return datos;
+    }).whenComplete(() {
+      if (identical(_consulta, solicitud) && _recibido == null) _consulta = null;
+    });
+    return _consulta = solicitud;
+  }
+
+  static Future<Map<String, dynamic>> _pedirHilos(String correo) async {
+    final uri = Uri.parse(guardianUrl).replace(queryParameters: {
+      'accion': 'mensajes_hilos',
+      'correo': correo,
+    });
+    final resp = await http.get(uri).timeout(const Duration(seconds: 60));
+    final datos = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (datos['ok'] != true) throw Exception(datos['error'] ?? 'Error');
+    return datos;
+  }
+
+  static Future<void> preparar() async {
+    try {
+      final correo = await SessionStore.validEmail();
+      if (correo != null && correo.isNotEmpty) await _hilosDe(correo);
+    } catch (_) {
+      // Al abrir el chat se reintenta si la precarga falló.
+    }
+  }
+
   @override
   State<MensajesScreen> createState() => _MensajesScreenState();
 }
@@ -35,23 +81,18 @@ class _MensajesScreenState extends State<MensajesScreen> {
   @override
   void initState() {
     super.initState();
-    _cargar();
+    _cargar(actualizar: false);
   }
 
-  Future<void> _cargar() async {
+  Future<void> _cargar({bool actualizar = true}) async {
     setState(() {
       _cargando = true;
       _error = null;
     });
     try {
       final c = (await SessionStore.validEmail()) ?? '';
-      final uri = Uri.parse(guardianUrl).replace(queryParameters: {
-        'accion': 'mensajes_hilos',
-        'correo': c,
-      });
-      final resp = await http.get(uri).timeout(const Duration(seconds: 60));
-      final d = jsonDecode(resp.body) as Map<String, dynamic>;
-      if (d['ok'] != true) throw Exception(d['error'] ?? 'Error');
+      if (c.isEmpty) throw StateError('Falta la sesión');
+      final d = await MensajesScreen._hilosDe(c, actualizar: actualizar);
       if (!mounted) return;
       setState(() {
         _correo = c;
@@ -108,7 +149,7 @@ class _MensajesScreenState extends State<MensajesScreen> {
           ),
         ],
       ),
-      body: _cargando
+      body: _cargando && _correo.isEmpty
           ? const Center(child: CircularProgressIndicator(color: cessumRed))
           : _error != null
               ? Center(
@@ -120,6 +161,7 @@ class _MensajesScreenState extends State<MensajesScreen> {
                   ]),
                 )
               : Column(children: [
+                  if (_cargando) const LinearProgressIndicator(),
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -369,7 +411,7 @@ class _MensajesScreenState extends State<MensajesScreen> {
         builder: (_) => _HiloScreen(correo: _correo, hilo: h),
       ),
     );
-    _cargar();
+    if (mounted) _cargar();
   }
 }
 
